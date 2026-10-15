@@ -1,0 +1,138 @@
+Project 2
+
+-- =====================================================================
+-- Project 2: Clinical Trial Operations & Execution Analytics (Spain)
+-- Therapeutic Area: Cardiovascular Diseases
+-- Data Source: ClinicalTrials.gov (Filtered for Cardiovascular & Spain)
+=====================================================================
+
+-- ---------------------------------------------------------------------
+-- Step 0: Data Ingestion & Database Setup
+-- Description: 
+-- 1. Downloaded 3,081 cardiovascular clinical trial records from ClinicalTrials.gov filtered for trial sites in Spain.
+-- 2. Imported raw CSV into SQLite as `raw_trials`.
+-- 3. Checked table structure and verified operational column availability.
+-- ---------------------------------------------------------------------
+
+PRAGMA table_info(raw_trials);
+
+-- ---------------------------------------------------------------------
+-- Step 1: Data Cleaning & Staging (Creating Cleaned View/Table)
+-- Description:
+-- - Standardizes missing phases into 'Not Applicable / Other'.
+-- - Calculates trial duration in months using Julianday.
+-- - Groups rare study statuses for cleaner reporting.
+-- ---------------------------------------------------------------------
+DROP TABLE IF EXISTS cleaned_clinical_trials;
+
+CREATE TABLE cleaned_clinical_trials AS
+SELECT 
+    NCT_Number AS nct_id,
+    Study_Title AS study_title,
+    Study_Status AS study_status,
+    -- Group rare or closed statuses together for cleaner visualization
+    CASE 
+        Study_Status
+        WHEN 'COMPLETED' THEN 'Completed'
+        WHEN 'RECRUITING' THEN 'Recruiting'
+        WHEN 'ACTIVE_NOT_RECRUITING' THEN 'Active, Not Recruiting'
+        WHEN 'TERMINATED' THEN 'Terminated'
+        WHEN 'NOT_YET_RECRUITING' THEN 'Not Yet Recruiting'
+        WHEN 'ENROLLING_BY_INVITATION' THEN 'Enrolling by Invitation'
+        ELSE 'Other / Discontinued'
+    END AS status_clean,
+    -- Standardize phases
+    CASE 
+        WHEN Phases IS NULL OR Phases = '' OR Phases = 'NA' THEN 'Not Applicable / Other'
+        ELSE Phases
+    END AS phase_clean,
+    COALESCE(Funder_Type, 'Other/Unknown') AS funder_type,
+    COALESCE(Enrollment, 0) AS enrollment_target,
+    Start_Date AS start_date,
+    Completion_Date AS completion_date,
+    -- Compute duration in months
+    CASE 
+        WHEN Start_Date IS NOT NULL AND Start_Date != 'Start_Date'
+             AND Completion_Date IS NOT NULL AND Completion_Date != 'Completion_Date'
+        THEN ROUND((julianday(Completion_Date) - julianday(Start_Date)) / 30.44, 1)
+        ELSE NULL 
+    END AS duration_months,
+    Locations AS locations_raw
+FROM raw_trials
+WHERE NCT_Number != 'NCT_Number' AND NCT_Number != 'NCT Number';
+
+
+-- ---------------------------------------------------------------------
+-- Step 2: Operational Analytics Queries
+-- ---------------------------------------------------------------------
+
+-- Query 1: Average Trial Duration by Cleaned Phase
+SELECT 
+    phase_clean,
+    COUNT(nct_id) AS total_trials,
+    ROUND(AVG(duration_months), 1) AS avg_duration_months
+FROM cleaned_clinical_trials
+WHERE duration_months IS NOT NULL
+GROUP BY phase_clean
+ORDER BY avg_duration_months DESC;
+
+-- Query 2: Trial Status Breakdown & Recruitment Numbers
+SELECT 
+    study_status,
+    COUNT(nct_id) AS total_trials,
+    SUM(enrollment_target) AS total_target_enrollment
+FROM cleaned_clinical_trials
+GROUP BY study_status
+ORDER BY total_trials DESC;
+
+-- Query 3: Sponsor / Funder Type Distribution
+SELECT 
+    funder_type,
+    COUNT(nct_id) AS total_trials,
+    ROUND(COUNT(nct_id) * 100.0 / (SELECT COUNT(*) FROM cleaned_clinical_trials), 1) AS percentage_share
+FROM cleaned_clinical_trials
+GROUP BY funder_type
+ORDER BY total_trials DESC;
+
+-- ==========================================
+-- STEP 3: ROBUST LOCATION DIMENSION TABLE
+-- ==========================================
+
+DROP TABLE IF EXISTS location;
+
+CREATE TABLE location AS
+SELECT 
+    nct_id,
+    locations_raw,
+    
+    -- Extract Hospital/Institution Name (text before the 1st comma)
+    TRIM(
+        CASE 
+            WHEN INSTR(locations_raw, ',') > 0 
+            THEN SUBSTR(locations_raw, 1, INSTR(locations_raw, ',') - 1)
+            ELSE locations_raw 
+        END
+    ) AS hospital_name,
+    
+    -- Robust City Mapping for Spain (Catching major hubs & fallback)
+    CASE 
+        WHEN locations_raw LIKE '%Madrid%' THEN 'Madrid'
+        WHEN locations_raw LIKE '%Barcelona%' THEN 'Barcelona'
+        WHEN locations_raw LIKE '%Valencia%' THEN 'Valencia'
+        WHEN locations_raw LIKE '%Seville%' OR locations_raw LIKE '%Sevilla%' THEN 'Seville'
+        WHEN locations_raw LIKE '%Zaragoza%' THEN 'Zaragoza'
+        WHEN locations_raw LIKE '%Malaga%' OR locations_raw LIKE '%Málaga%' THEN 'Malaga'
+        WHEN locations_raw LIKE '%Bilbao%' THEN 'Bilbao'
+        WHEN locations_raw LIKE '%Murcia%' THEN 'Murcia'
+        WHEN locations_raw LIKE '%Valladolid%' THEN 'Valladolid'
+        WHEN locations_raw LIKE '%Pamplona%' THEN 'Pamplona'
+        WHEN locations_raw LIKE '%Santiago de Compostela%' THEN 'Santiago de Compostela'
+        WHEN locations_raw LIKE '%Cordoba%' OR locations_raw LIKE '%Córdoba%' THEN 'Cordoba'
+        WHEN locations_raw LIKE '%Alicante%' THEN 'Alicante'
+        WHEN locations_raw LIKE '%Granada%' THEN 'Granada'
+        WHEN locations_raw LIKE '%Girona%' THEN 'Girona'
+        WHEN locations_raw LIKE '%Salamanca%' THEN 'Salamanca'
+        ELSE 'Other / International'
+    END AS city
+
+FROM cleaned_clinical_trials;
